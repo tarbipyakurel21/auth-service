@@ -20,6 +20,9 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
       - name: Build with Maven
         run: mvn clean package -DskipTests
 
@@ -43,18 +46,30 @@ jobs:
         run: |
           docker push 326061183428.dkr.ecr.us-east-2.amazonaws.com/auth-service:latest
 
-      - name: Register new task definition revision
+      - name: Register new task definition revision with environment variables
         id: register-task
         run: |
-          TASK_DEF_ARN=$(aws ecs register-task-definition \
-            --family auth-service-task \
-            --execution-role-arn arn:aws:iam::326061183428:role/ecsTaskExecutionRole \
-            --requires-compatibilities FARGATE \
-            --network-mode awsvpc \
-            --cpu 512 \
-            --memory 1024 \
-            --container-definitions "$(aws ecs describe-task-definition --task-definition auth-service-task --query 'taskDefinition.containerDefinitions' --output json | sed "s|326061183428.dkr.ecr.us-east-2.amazonaws.com/auth-service:.*|326061183428.dkr.ecr.us-east-2.amazonaws.com/auth-service:latest|")" \
-            --query 'taskDefinition.taskDefinitionArn' --output text)
+          EXISTING_DEF=$(aws ecs describe-task-definition --task-definition auth-service-task)
+          NEW_DEF=$(echo $EXISTING_DEF | jq \
+            --arg IMAGE "326061183428.dkr.ecr.us-east-2.amazonaws.com/auth-service:latest" \
+            --arg JWT_SECRET "${{ secrets.JWT_SECRET }}" \
+            --arg DB_URL "${{ secrets.DB_URL }}" \
+            --arg DB_USERNAME "${{ secrets.DB_USERNAME }}" \
+            --arg DB_PASSWORD "${{ secrets.DB_PASSWORD }}" \
+            --arg GOOGLE_CLIENT_ID "${{ secrets.GOOGLE_CLIENT_ID }}" \
+            --arg GOOGLE_CLIENT_SECRET "${{ secrets.GOOGLE_CLIENT_SECRET }}" \
+            '.taskDefinition | 
+              .containerDefinitions[0].image = $IMAGE |
+              .containerDefinitions[0].environment = [
+                { "name": "JWT_SECRET", "value": $JWT_SECRET },
+                { "name": "DB_URL", "value": $DB_URL },
+                { "name": "DB_USERNAME", "value": $DB_USERNAME },
+                { "name": "DB_PASSWORD", "value": $DB_PASSWORD },
+                { "name": "GOOGLE_CLIENT_ID", "value": $GOOGLE_CLIENT_ID },
+                { "name": "GOOGLE_CLIENT_SECRET", "value": $GOOGLE_CLIENT_SECRET }
+              ] |
+              { family, executionRoleArn, networkMode, containerDefinitions, requiresCompatibilities, cpu, memory }')
+          TASK_DEF_ARN=$(echo $NEW_DEF | aws ecs register-task-definition --cli-input-json file:///dev/stdin --query 'taskDefinition.taskDefinitionArn' --output text)
           echo "task_definition_arn=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
 
       - name: Deploy to Amazon ECS via AWS CLI
